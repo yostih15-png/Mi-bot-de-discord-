@@ -1,0 +1,343 @@
+require('dotenv').config();
+
+const { 
+  Client, 
+  GatewayIntentBits, 
+  Partials, 
+  Events, 
+  ActionRowBuilder, 
+  ButtonBuilder, 
+  ButtonStyle, 
+  EmbedBuilder, 
+  PermissionsBitField 
+} = require('discord.js');
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds, 
+    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+  ],
+  partials: [Partials.Channel],
+});
+
+/* ======= SISTEMA SOPORTE + TICKETS ======= */
+
+// Estado inicial del panel soporte
+let textoPanelSoporte = `👋 **¡Bienvenido al Sistema de Soporte!**\nSi necesitas ayuda, comprar un hosting, o formar alianzas, usa los botones de abajo. Estamos para servirte. 😊`;
+
+// Botones por defecto soporte (id, label, emoji, style)
+let botonesSoporte = [
+  { id: 'comprar', label: 'Comprar', emoji: '🛒', style: ButtonStyle.Primary },
+  { id: 'soporte', label: 'Soporte', emoji: '🛠️', style: ButtonStyle.Success },
+  { id: 'alianzas', label: 'Alianzas', emoji: '🤝', style: ButtonStyle.Secondary }
+];
+
+// Guardamos el mensaje y canal del panel soporte para borrar
+let mensajePanelSoporteId = null;
+let canalPanelSoporteId = null;
+
+// Tickets abiertos: userId => canalId
+const tickets = new Map();
+
+/* ======= SISTEMA VERIFICACION ======= */
+// Variables para guardar configuración verificación
+let canalVerificacionId = null;
+let rolVerificacionId = null;
+let textoPanelVerificacion = null;
+let mensajePrivadoVerificacion = null;
+let mensajeVerificacionId = null;
+
+/* === HELPERS === */
+
+function crearEmbed(texto, color = 0x00ffff) {
+  return new EmbedBuilder()
+    .setDescription(texto)
+    .setColor(color);
+}
+
+/* ======= COMANDOS ======= */
+
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  // Solo administradores pueden usar comandos para soporte y verificación
+  const isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
+
+  const args = message.content.trim().split(/ +/g);
+  const cmd = args.shift().toLowerCase();
+
+  /* ======= SOPORTE ======= */
+  if (isAdmin && cmd === '!crearsoporte') {
+    // Crear fila de botones con emojis y estilos
+    const filaBotones = new ActionRowBuilder();
+    for (const b of botonesSoporte) {
+      filaBotones.addComponents(
+        new ButtonBuilder()
+          .setCustomId(b.id)
+          .setLabel(b.label)
+          .setEmoji(b.emoji)
+          .setStyle(b.style)
+      );
+    }
+    // Enviar embed con botones
+    const embed = crearEmbed(textoPanelSoporte, 0x0099ff);
+    const msg = await message.channel.send({ embeds: [embed], components: [filaBotones] });
+
+    mensajePanelSoporteId = msg.id;
+    canalPanelSoporteId = msg.channel.id;
+
+    return message.reply('✅ Panel de soporte creado correctamente.');
+  }
+
+  if (isAdmin && cmd === '!borrarsoporte') {
+    if (!mensajePanelSoporteId || !canalPanelSoporteId) return message.reply('❌ No hay panel de soporte para borrar.');
+
+    try {
+      const canal = await client.channels.fetch(canalPanelSoporteId);
+      const msg = await canal.messages.fetch(mensajePanelSoporteId);
+      await msg.delete();
+
+      mensajePanelSoporteId = null;
+      canalPanelSoporteId = null;
+
+      return message.reply('✅ Panel de soporte borrado correctamente.');
+    } catch {
+      return message.reply('❌ No pude borrar el panel. ¿Ya fue borrado?');
+    }
+  }
+
+  if (isAdmin && cmd === '!settextosoporte') {
+    const nuevoTexto = args.join(' ');
+    if (!nuevoTexto) return message.reply('❌ Debes escribir el nuevo texto para el panel de soporte.');
+    textoPanelSoporte = nuevoTexto;
+    return message.reply('✅ Texto del panel de soporte actualizado. Usa !borrarsoporte y !crearsoporte para actualizar el panel.');
+  }
+
+  if (isAdmin && cmd === '!editbotonsoporte') {
+    if (args.length < 3) return message.reply('❌ Uso: !editbotonsoporte <id> <emoji> <nombre>');
+    const [id, emoji, ...labelArr] = args;
+    const label = labelArr.join(' ');
+    const boton = botonesSoporte.find(b => b.id === id);
+    if (!boton) return message.reply('❌ No existe un botón con ese id.');
+    boton.emoji = emoji;
+    boton.label = label;
+    return message.reply(`✅ Botón \`${id}\` actualizado a: ${emoji} ${label}\nRecuerda borrar y crear el panel para ver los cambios.`);
+  }
+
+  /* ======= VERIFICACIÓN ======= */
+
+  if (isAdmin && cmd === '!setverificacion') {
+    if (args.length < 4) {
+      return message.reply('❌ Uso: !setverificacion #canal @rol texto_panel | mensaje_privado\nEjemplo: !setverificacion #verificacion @Miembro Bienvenido al servidor! Gracias por verificarte.');
+    }
+    const canal = message.mentions.channels.first();
+    const rol = message.mentions.roles.first();
+
+    if (!canal) return message.reply('❌ Menciona un canal válido.');
+    if (!rol) return message.reply('❌ Menciona un rol válido.');
+
+    args.shift();
+    args.shift();
+
+    const textoCompleto = args.join(' ');
+    if (!textoCompleto.includes('|')) {
+      return message.reply('❌ Debes separar el texto del panel y el mensaje privado con un "|" (barra vertical). Ejemplo:\n!setverificacion #canal @rol texto del panel | mensaje privado');
+    }
+
+    const [textoPanel, mensajePrivado] = textoCompleto.split('|').map(x => x.trim());
+
+    if (!textoPanel || !mensajePrivado) {
+      return message.reply('❌ El texto del panel y el mensaje privado no pueden estar vacíos.');
+    }
+
+    canalVerificacionId = canal.id;
+    rolVerificacionId = rol.id;
+    textoPanelVerificacion = textoPanel;
+    mensajePrivadoVerificacion = mensajePrivado;
+
+    const botonVerificar = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('verificar')
+        .setLabel('Verificar')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('✅')
+    );
+
+    const embedVerificacion = new EmbedBuilder()
+      .setDescription(textoPanelVerificacion)
+      .setColor(0x0099ff)
+      .setFooter({ text: 'Sistema de Verificación' })
+      .setTimestamp();
+
+    const msg = await canal.send({ embeds: [embedVerificacion], components: [botonVerificar] });
+
+    mensajeVerificacionId = msg.id;
+
+    return message.reply('✅ Panel de verificación creado correctamente.');
+  }
+
+  if (isAdmin && cmd === '!quitarverificacion') {
+    if (!canalVerificacionId || !mensajeVerificacionId) return message.reply('❌ No hay panel de verificación activo.');
+
+    try {
+      const canal = await client.channels.fetch(canalVerificacionId);
+      const msg = await canal.messages.fetch(mensajeVerificacionId);
+      await msg.delete();
+
+      canalVerificacionId = null;
+      rolVerificacionId = null;
+      textoPanelVerificacion = null;
+      mensajePrivadoVerificacion = null;
+      mensajeVerificacionId = null;
+
+      return message.reply('✅ Panel de verificación eliminado correctamente.');
+    } catch {
+      return message.reply('❌ No pude eliminar el panel. ¿Ya fue borrado?');
+    }
+  }
+
+  /* ======= CERRAR TICKET ======= */
+  if (cmd === '!cerrarticket') {
+    if (!message.channel.name.startsWith('ticket-')) 
+      return message.reply('❌ Este comando solo funciona dentro de un canal de ticket.');
+
+    if (!tickets.has(message.author.id)) {
+      return message.reply('❌ No tienes un ticket abierto aquí.');
+    }
+
+    try {
+      await message.channel.delete();
+      tickets.delete(message.author.id);
+    } catch {
+      message.reply('❌ No pude cerrar el ticket.');
+    }
+  }
+
+  /* ======= SISTEMA SAY (enviar mensajes) ======= */
+  if (cmd === '!say') {
+    if (args.length < 2) return message.reply('❌ Uso: !say <mensaje|embed> texto');
+
+    const tipo = args.shift().toLowerCase();
+    const texto = args.join(' ');
+    if (!texto) return message.reply('❌ Debes escribir el texto para enviar.');
+
+    if (tipo === 'mensaje') {
+      await message.channel.send(texto);
+    } else if (tipo === 'embed') {
+      const embed = new EmbedBuilder()
+        .setColor('#0099ff') // borde azul
+        .setDescription(texto)
+        .setFooter({ text: 'Mensaje enviado por Psyche Bot' })
+        .setTimestamp()
+        .setAuthor({ name: message.author.username, iconURL: message.author.displayAvatarURL() });
+
+      await message.channel.send({ embeds: [embed] });
+    } else {
+      return message.reply('❌ El tipo debe ser "mensaje" o "embed".');
+    }
+  }
+});
+
+/* ======= MANEJO DE BOTONES ======= */
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  const userId = interaction.user.id;
+
+  /* === BOTONES SOPORTE === */
+  if (['comprar','soporte','alianzas'].includes(interaction.customId)) {
+
+    if (tickets.has(userId)) {
+      const canalAbiertoId = tickets.get(userId);
+      if (interaction.guild.channels.cache.has(canalAbiertoId)) {
+        return interaction.reply({ content: '⚠️ Ya tienes un ticket abierto. Cierra ese antes de abrir otro.', ephemeral: true });
+      } else {
+        tickets.delete(userId); // Si canal fue borrado manualmente
+      }
+    }
+
+    const tipo = interaction.customId;
+
+    const canalTicket = await interaction.guild.channels.create({
+      name: `ticket-${interaction.user.username}`,
+      type: 0, // texto
+      permissionOverwrites: [
+        {
+          id: interaction.guild.roles.everyone,
+          deny: [PermissionsBitField.Flags.ViewChannel],
+        },
+        {
+          id: userId,
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+        }
+      ],
+    });
+
+    tickets.set(userId, canalTicket.id);
+
+    const embedTicket = new EmbedBuilder()
+      .setTitle(`Ticket de ${interaction.user.username}`)
+      .setDescription(`Has abierto un ticket para: **${tipo.toUpperCase()}**\nEspera soporte pronto.`)
+      .setColor(0x00ffff)
+      .setFooter({ text: 'Escribe !cerrarticket para cerrar este canal cuando termines.' });
+
+    const botonCerrar = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('cerrar_ticket')
+        .setLabel('Cerrar Ticket')
+        .setStyle(ButtonStyle.Danger)
+    );
+
+    await canalTicket.send({ content: `${interaction.user}`, embeds: [embedTicket], components: [botonCerrar] });
+
+    await interaction.reply({ content: `✅ Ticket creado: ${canalTicket}`, ephemeral: true });
+  }
+
+  /* === BOTON CERRAR TICKET === */
+  if (interaction.customId === 'cerrar_ticket') {
+    const canal = interaction.channel;
+    const userId = [...tickets.entries()].find(([user, canalId]) => canalId === canal.id)?.[0];
+    if (!userId) {
+      return interaction.reply({ content: '❌ No puedo encontrar este ticket en la base de datos.', ephemeral: true });
+    }
+
+    try {
+      await canal.delete();
+      tickets.delete(userId);
+    } catch {
+      interaction.reply({ content: '❌ No pude cerrar el ticket.', ephemeral: true });
+    }
+  }
+
+  /* === BOTON VERIFICACION === */
+  if (interaction.customId === 'verificar') {
+    if (!rolVerificacionId) {
+      return interaction.reply({ content: '❌ No hay sistema de verificación activo.', ephemeral: true });
+    }
+
+    const rol = interaction.guild.roles.cache.get(rolVerificacionId);
+    if (!rol) return interaction.reply({ content: '❌ No pude encontrar el rol de verificación.', ephemeral: true });
+
+    const member = interaction.member;
+
+    if (member.roles.cache.has(rol.id)) {
+      return interaction.reply({ content: '⚠️ Ya estás verificado.', ephemeral: true });
+    }
+
+    try {
+      await member.roles.add(rol);
+      await interaction.reply({ content: mensajePrivadoVerificacion || '✅ ¡Te has verificado correctamente!', ephemeral: true });
+    } catch {
+      interaction.reply({ content: '❌ No pude asignarte el rol. ¿Tengo permisos?', ephemeral: true });
+    }
+  }
+});
+
+client.once(Events.ClientReady, () => {
+  console.log(`✅ Bot listo como ${client.user.tag}`);
+});
+
+client.login(process.env.TOKEN);
